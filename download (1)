@@ -1,0 +1,101 @@
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInWithPopup, GoogleAuthProvider, onAuthStateChanged, User } from 'firebase/auth';
+import firebaseConfig from '../../firebase-applet-config.json';
+
+const app = initializeApp(firebaseConfig);
+export const auth = getAuth(app);
+
+const provider = new GoogleAuthProvider();
+provider.addScope('https://www.googleapis.com/auth/calendar');
+
+let isSigningIn = false;
+let cachedAccessToken: string | null = null;
+
+// Initialize auth state listener
+export const initAuth = (
+  onAuthSuccess?: (user: User, token: string) => void,
+  onAuthFailure?: () => void
+) => {
+  // Try to load cached token from session memory to preserve across hot refreshes if any,
+  // but keeping in-memory per instructions is best. Let's use sessionStorage as a secure fallback
+  // or simple local variable. Let's check sessionStorage which is cleared when tab closes.
+  try {
+    cachedAccessToken = sessionStorage.getItem('gcal_token');
+  } catch (e) {
+    // Ignore
+  }
+
+  return onAuthStateChanged(auth, async (user: User | null) => {
+    if (user) {
+      if (cachedAccessToken) {
+        if (onAuthSuccess) onAuthSuccess(user, cachedAccessToken);
+      } else if (!isSigningIn) {
+        // If we have user but no token, we might need them to trigger sign-in again
+        if (onAuthFailure) onAuthFailure();
+      }
+    } else {
+      cachedAccessToken = null;
+      try { sessionStorage.removeItem('gcal_token'); } catch (e) {}
+      if (onAuthFailure) onAuthFailure();
+    }
+  });
+};
+
+// Google Sign-In popup
+export const googleSignIn = async (): Promise<{ user: User; accessToken: string } | null> => {
+  try {
+    isSigningIn = true;
+    
+    // Proactively check if running in an iframe
+    const isInIframe = window.self !== window.top;
+    if (isInIframe) {
+      throw new Error(
+        "Google Sign-In cannot open popups inside the Google AI Studio iframe sandbox. " +
+        "Please click 'Open in New Tab' at the top-right of the preview to log in and sync your Calendar successfully!"
+      );
+    }
+
+    const result = await signInWithPopup(auth, provider);
+    const credential = GoogleAuthProvider.credentialFromResult(result);
+    if (!credential?.accessToken) {
+      throw new Error('Failed to get access token from Google Auth');
+    }
+
+    cachedAccessToken = credential.accessToken;
+    try {
+      sessionStorage.setItem('gcal_token', cachedAccessToken);
+    } catch (e) {}
+    return { user: result.user, accessToken: cachedAccessToken };
+  } catch (error: any) {
+    console.error('Sign in error:', error);
+    
+    // Wrap common iframe/firebase error cases with highly helpful guidance
+    const errMsg = error.message || String(error);
+    if (
+      errMsg.includes('cancelled-popup-request') || 
+      errMsg.includes('popup-closed-by-user') ||
+      errMsg.includes('internal-error') ||
+      errMsg.includes('assertion-failed')
+    ) {
+      throw new Error(
+        "Google Sign-In popup was blocked or closed. Because the app is inside an iframe sandbox, " +
+        "please click 'Open in New Tab' at the top-right of the preview to complete authentication."
+      );
+    }
+    throw error;
+  } finally {
+    isSigningIn = false;
+  }
+};
+
+export const getAccessToken = async (): Promise<string | null> => {
+  return cachedAccessToken;
+};
+
+export const logout = async () => {
+  await auth.signOut();
+  cachedAccessToken = null;
+  try {
+    sessionStorage.removeItem('gcal_token');
+  } catch (e) {}
+};
